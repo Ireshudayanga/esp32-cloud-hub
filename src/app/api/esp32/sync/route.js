@@ -7,10 +7,19 @@ export async function POST(request) {
     const expectedKey = process.env.ESP32_API_SECRET || 'esp32_secret_key_98765';
 
     if (apiKey !== expectedKey) {
+      console.error('ESP32 sync unauthorized key:', apiKey);
       return NextResponse.json({ error: 'Unauthorized ESP32 key' }, { status: 401 });
     }
 
-    const body = await request.json();
+    const rawText = await request.text();
+    let body = {};
+    try {
+      body = rawText ? JSON.parse(rawText) : {};
+    } catch (parseErr) {
+      console.error('ESP32 JSON parse error:', parseErr.message, 'Raw payload:', rawText);
+      return NextResponse.json({ error: 'Invalid JSON payload from ESP32' }, { status: 400 });
+    }
+
     const {
       activeNetwork = 'WIFI',
       localChanged = false,
@@ -26,14 +35,34 @@ export async function POST(request) {
       r2Override,
     } = body;
 
-    const { data: dbState, error } = await supabaseAdmin
+    let { data: dbState, error } = await supabaseAdmin
       .from('device_state')
       .select('*')
       .eq('id', 'esp32_main')
-      .single();
+      .maybeSingle();
 
-    if (error || !dbState) {
-      return NextResponse.json({ error: 'Database row missing' }, { status: 500 });
+    if (error) {
+      console.error('Supabase fetch error:', error);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    // Auto-seed the 'esp32_main' row if it doesn't exist yet
+    if (!dbState) {
+      console.warn('esp32_main row missing — auto-inserting default row...');
+      const { data: inserted, error: insertErr } = await supabaseAdmin
+        .from('device_state')
+        .insert({ id: 'esp32_main' })
+        .select()
+        .single();
+
+      if (insertErr || !inserted) {
+        console.error('Supabase auto-insert error:', insertErr);
+        return NextResponse.json(
+          { error: insertErr?.message || 'Failed to initialize device_state row' },
+          { status: 500 }
+        );
+      }
+      dbState = inserted;
     }
 
     const nowIso = new Date().toISOString();
@@ -57,7 +86,7 @@ export async function POST(request) {
         });
       }
 
-      const { data: updated } = await supabaseAdmin
+      const { data: updated, error: updateErr } = await supabaseAdmin
         .from('device_state')
         .update({
           relay1: typeof relay1 === 'boolean' ? relay1 : dbState.relay1,
@@ -78,15 +107,21 @@ export async function POST(request) {
         .select()
         .single();
 
+      if (updateErr) {
+        console.error('Supabase localChanged update error:', updateErr);
+        return NextResponse.json({ error: updateErr.message }, { status: 500 });
+      }
+
       if (logsToInsert.length > 0) {
-        await supabaseAdmin.from('relay_logs').insert(logsToInsert);
+        const { error: logErr } = await supabaseAdmin.from('relay_logs').insert(logsToInsert);
+        if (logErr) console.error('Supabase relay_logs insert error:', logErr);
       }
 
       return NextResponse.json(formatEspResponse(updated || dbState));
     }
 
     // Case 2: Normal heartbeat poll — update last_seen & return desired cloud state to ESP32
-    await supabaseAdmin
+    const { error: heartbeatErr } = await supabaseAdmin
       .from('device_state')
       .update({
         active_network: activeNetwork,
@@ -94,9 +129,15 @@ export async function POST(request) {
       })
       .eq('id', 'esp32_main');
 
+    if (heartbeatErr) {
+      console.error('Supabase heartbeat update error:', heartbeatErr);
+      return NextResponse.json({ error: heartbeatErr.message }, { status: 500 });
+    }
+
     return NextResponse.json(formatEspResponse(dbState));
   } catch (err) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error('ESP32 sync unhandled crash:', err);
+    return NextResponse.json({ error: err.message || 'Internal Server Error' }, { status: 500 });
   }
 }
 
