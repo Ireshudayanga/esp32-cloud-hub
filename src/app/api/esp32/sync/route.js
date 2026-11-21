@@ -68,7 +68,6 @@ export async function POST(request) {
     const nowIso = new Date().toISOString();
 
     // Case 1: ESP32 had a local event (BLE button, Schedule trigger, or Boot catch-up)
-    // Push ESP32's authoritative hardware state up to Supabase
     if (localChanged) {
       const logsToInsert = [];
       if (typeof relay1 === 'boolean' && relay1 !== dbState.relay1) {
@@ -153,5 +152,8 @@ function formatEspResponse(row) {
     r2On: row.r2_on_time,
     r2Off: row.r2_off_time,
     r2Over: row.r2_override ? 1 : 0,
+    cWifiEn: row.custom_wifi_enabled ? 1 : 0,
+    cWifiSsid: row.custom_wifi_ssid || '',
+    cWifiPass: row.custom_wifi_pass || '',
   };
 }
